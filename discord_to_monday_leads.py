@@ -1,16 +1,14 @@
 """
 Discord LinkedIn/Public Link -> Monday.com Lead Capture Bot
 
-Use in Discord:
-    /lead https://www.linkedin.com/posts/...
+Two modes:
+1. Live Discord slash command:
+   /lead https://www.linkedin.com/posts/...
 
-The bot:
-- Scrapes basic public metadata from the URL
-- Detects likely role/skill from the post text
-- Creates a lead in Monday.com
-- Dedupes links locally using SQLite
+2. Scheduled GitHub Actions poller:
+   poll_discord_channel_links.py imports this file and reuses process_lead_url().
 
-Keep secrets in .env locally or in your hosting platform/GitHub Secrets.
+Keep secrets in .env locally, GitHub Secrets, or hosting environment variables.
 Do not commit a real .env file.
 """
 
@@ -34,41 +32,50 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
-DISCORD_GUILD_ID = os.getenv("DISCORD_GUILD_ID", "").strip()
-MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "").strip()
-MONDAY_DEFAULT_GROUP_ID = os.getenv("MONDAY_DEFAULT_GROUP_ID", "group_mm1vwy0q").strip()
 
-AUTO_CAPTURE_LINKS = os.getenv("DISCORD_AUTO_CAPTURE_LINKS", "false").strip().lower() == "true"
+def env_value(name: str, default: str = "") -> str:
+    """Return env value, but fall back to default when GitHub passes a blank secret."""
+    value = os.getenv(name)
+    if value is None or str(value).strip() == "":
+        return default
+    return str(value).strip()
+
+
+DISCORD_BOT_TOKEN = env_value("DISCORD_BOT_TOKEN")
+DISCORD_GUILD_ID = env_value("DISCORD_GUILD_ID")
+MONDAY_API_TOKEN = env_value("MONDAY_API_TOKEN")
+MONDAY_DEFAULT_GROUP_ID = env_value("MONDAY_DEFAULT_GROUP_ID", "group_mm1vwy0q")
+
+AUTO_CAPTURE_LINKS = env_value("DISCORD_AUTO_CAPTURE_LINKS", "false").lower() == "true"
 ALLOWED_CHANNEL_IDS = {
     int(channel_id.strip())
-    for channel_id in os.getenv("DISCORD_ALLOWED_CHANNEL_IDS", "").split(",")
+    for channel_id in env_value("DISCORD_ALLOWED_CHANNEL_IDS").split(",")
     if channel_id.strip().isdigit()
 }
 
 try:
-    CHANNEL_GROUP_MAP: dict[str, str] = json.loads(os.getenv("CHANNEL_GROUP_MAP", "{}"))
+    CHANNEL_GROUP_MAP: dict[str, str] = json.loads(env_value("CHANNEL_GROUP_MAP", "{}"))
 except json.JSONDecodeError:
     CHANNEL_GROUP_MAP = {}
 
-MONDAY_BOARD_ID = os.getenv("MONDAY_BOARD_ID", "18405764077").strip()
+MONDAY_BOARD_ID = env_value("MONDAY_BOARD_ID", "18405764077")
 MONDAY_API_URL = "https://api.monday.com/v2"
-DATABASE_PATH = "lead_dedup.sqlite3"
+DATABASE_PATH = env_value("LEAD_DEDUP_DATABASE", "lead_dedup.sqlite3")
 
-COL_STATUS = os.getenv("COL_STATUS", "color_mm1v7b3s").strip()
-COL_MARKET = os.getenv("COL_MARKET", "color_mm3fkwv7").strip()
-COL_POST_DATE = os.getenv("COL_POST_DATE", "date_mm1v35kx").strip()
-COL_LINK_TO_JP = os.getenv("COL_LINK_TO_JP", "link_mm1v7vdj").strip()
-COL_COMPANY_CHANNEL = os.getenv("COL_COMPANY_CHANNEL", "text_mm1vyhy").strip()
-COL_LINKEDIN_PROFILE = os.getenv("COL_LINKEDIN_PROFILE", "link_mm1vbyjc").strip()
-COL_EMAIL = os.getenv("COL_EMAIL", "email_mm1v1yzs").strip()
-COL_PRIMARY_SKILL = os.getenv("COL_PRIMARY_SKILL", "dropdown_mm1vf5c9").strip()
-COL_LOCATION_TYPE = os.getenv("COL_LOCATION_TYPE", "dropdown_mm1vrjm1").strip()
-COL_PLATFORM = os.getenv("COL_PLATFORM", "color_mm1vhds4").strip()
-COL_SOURCED_FROM = os.getenv("COL_SOURCED_FROM", "color_mm1vhjmn").strip()
-COL_CATEGORY = os.getenv("COL_CATEGORY", "color_mm1vcyn7").strip()
-COL_DESCRIPTION = os.getenv("COL_DESCRIPTION", "long_text_mm1v4f4k").strip()
-COL_ROLE_POSITION = os.getenv("COL_ROLE_POSITION", "dropdown_mm1v8vzh").strip()
+COL_STATUS = env_value("COL_STATUS", "color_mm1v7b3s")
+COL_MARKET = env_value("COL_MARKET", "color_mm3fkwv7")
+COL_POST_DATE = env_value("COL_POST_DATE", "date_mm1v35kx")
+COL_LINK_TO_JP = env_value("COL_LINK_TO_JP", "link_mm1v7vdj")
+COL_COMPANY_CHANNEL = env_value("COL_COMPANY_CHANNEL", "text_mm1vyhy")
+COL_LINKEDIN_PROFILE = env_value("COL_LINKEDIN_PROFILE", "link_mm1vbyjc")
+COL_EMAIL = env_value("COL_EMAIL", "email_mm1v1yzs")
+COL_PRIMARY_SKILL = env_value("COL_PRIMARY_SKILL", "dropdown_mm1vf5c9")
+COL_LOCATION_TYPE = env_value("COL_LOCATION_TYPE", "dropdown_mm1vrjm1")
+COL_PLATFORM = env_value("COL_PLATFORM", "color_mm1vhds4")
+COL_SOURCED_FROM = env_value("COL_SOURCED_FROM", "color_mm1vhjmn")
+COL_CATEGORY = env_value("COL_CATEGORY", "color_mm1vcyn7")
+COL_DESCRIPTION = env_value("COL_DESCRIPTION", "long_text_mm1v4f4k")
+COL_ROLE_POSITION = env_value("COL_ROLE_POSITION", "dropdown_mm1v8vzh")
 
 URL_REGEX = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
 EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -159,6 +166,8 @@ def require_env() -> None:
         missing.append("DISCORD_BOT_TOKEN")
     if not MONDAY_API_TOKEN:
         missing.append("MONDAY_API_TOKEN")
+    if not MONDAY_BOARD_ID:
+        missing.append("MONDAY_BOARD_ID")
     if not MONDAY_DEFAULT_GROUP_ID:
         missing.append("MONDAY_DEFAULT_GROUP_ID")
     if missing:
