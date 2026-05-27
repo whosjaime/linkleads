@@ -1,0 +1,66 @@
+name: Poll Discord Links
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: poll-discord-links
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Poll Discord channel links
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
+          DISCORD_ALLOWED_CHANNEL_IDS: ${{ secrets.DISCORD_ALLOWED_CHANNEL_IDS }}
+          MONDAY_BOARD_ID: ${{ secrets.MONDAY_BOARD_ID }}
+          MONDAY_DEFAULT_GROUP_ID: ${{ secrets.MONDAY_DEFAULT_GROUP_ID }}
+          COL_STATUS: ${{ secrets.COL_STATUS }}
+          COL_MARKET: ${{ secrets.COL_MARKET }}
+          COL_POST_DATE: ${{ secrets.COL_POST_DATE }}
+          COL_LINK_TO_JP: ${{ secrets.COL_LINK_TO_JP }}
+          COL_COMPANY_CHANNEL: ${{ secrets.COL_COMPANY_CHANNEL }}
+          COL_LINKEDIN_PROFILE: ${{ secrets.COL_LINKEDIN_PROFILE }}
+          COL_EMAIL: ${{ secrets.COL_EMAIL }}
+          COL_PRIMARY_SKILL: ${{ secrets.COL_PRIMARY_SKILL }}
+          COL_LOCATION_TYPE: ${{ secrets.COL_LOCATION_TYPE }}
+          COL_PLATFORM: ${{ secrets.COL_PLATFORM }}
+          COL_SOURCED_FROM: ${{ secrets.COL_SOURCED_FROM }}
+          COL_CATEGORY: ${{ secrets.COL_CATEGORY }}
+          COL_DESCRIPTION: ${{ secrets.COL_DESCRIPTION }}
+          COL_ROLE_POSITION: ${{ secrets.COL_ROLE_POSITION }}
+        run: python poll_discord_channel_links.py
+
+      - name: Commit seen state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen_leads_state.json || true
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update seen lead state"
+            git push
+          fi
