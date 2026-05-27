@@ -6,7 +6,7 @@ This is for the non-live setup:
 - It checks configured Discord channels for recent messages.
 - It extracts links from those messages.
 - It sends new links to Monday.com using discord_to_monday_leads.py.
-- It stores only message IDs and URL hashes in seen_leads_state.json.
+- It stores only processed message IDs and URL hashes in seen_leads_state.json.
 
 Required secrets/env:
 - DISCORD_BOT_TOKEN
@@ -104,21 +104,34 @@ async def main() -> None:
     created_count = 0
     skipped_count = 0
     error_count = 0
+    total_messages = 0
+    total_urls_found = 0
+    empty_content_messages = 0
 
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     async with aiohttp.ClientSession(headers=headers) as session:
         for channel_id in DISCORD_ALLOWED_CHANNEL_IDS:
             messages = await fetch_recent_messages(session, channel_id)
+            total_messages += len(messages)
+            print(f"Fetched {len(messages)} messages from Discord channel {channel_id}")
 
             # Discord returns newest first. Process oldest first.
             for message in reversed(messages):
                 message_id = str(message.get("id", ""))
                 content = message.get("content") or ""
-                urls = URL_REGEX.findall(content)
 
+                if not content:
+                    empty_content_messages += 1
+
+                urls = URL_REGEX.findall(content)
+                if urls:
+                    print(f"Message {message_id} contains {len(urls)} URL(s)")
+                total_urls_found += len(urls)
+
+                # Important: do NOT mark messages without URLs as seen.
+                # If Message Content Intent was off, Discord can return empty content.
+                # Marking those empty messages as seen would permanently skip them later.
                 if not urls:
-                    if message_id and message_id not in seen_message_ids:
-                        seen_message_ids.add(message_id)
                     continue
 
                 if message_id in seen_message_ids:
@@ -155,7 +168,17 @@ async def main() -> None:
     state["url_hashes"] = list(seen_url_hashes)
     save_state(state)
 
-    print(f"Done. Created: {created_count}, skipped: {skipped_count}, errors: {error_count}")
+    print(
+        f"Done. Messages fetched: {total_messages}, empty-content messages: {empty_content_messages}, "
+        f"URLs found: {total_urls_found}, created: {created_count}, skipped: {skipped_count}, errors: {error_count}"
+    )
+
+    if total_messages and empty_content_messages == total_messages:
+        print(
+            "WARNING: All fetched Discord messages had empty content. "
+            "Turn on Message Content Intent in Discord Developer Portal > Bot, "
+            "and make sure the bot can Read Message History in the channel."
+        )
 
     if error_count:
         raise SystemExit(1)
