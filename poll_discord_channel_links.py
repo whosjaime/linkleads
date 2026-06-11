@@ -149,6 +149,7 @@ async def main() -> None:
                             url=url,
                             channel_id=int(channel_id),
                             source_channel=f"Discord channel {channel_id} message {message_id}",
+                            source_text=content,
                         )
                         print(result)
                         if created:
