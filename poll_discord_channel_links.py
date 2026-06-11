@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,11 @@ SEEN_STATE_FILE = Path(os.getenv("SEEN_STATE_FILE", "seen_leads_state.json"))
 DISCORD_API_BASE = "https://discord.com/api/v10"
 MAX_STATE_ITEMS = int(os.getenv("MAX_STATE_ITEMS", "5000"))
 
+MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "").strip()
+MONDAY_BOARD_ID = os.getenv("MONDAY_BOARD_ID", "18405764077").strip()
+MONDAY_API_URL = "https://api.monday.com/v2"
+COL_REFERRAL_BONUS = os.getenv("COL_REFERRAL_BONUS", "text_mm33jner").strip()
+
 
 def require_env() -> None:
     missing = []
@@ -53,6 +59,12 @@ def require_env() -> None:
         missing.append("DISCORD_BOT_TOKEN")
     if not DISCORD_ALLOWED_CHANNEL_IDS:
         missing.append("DISCORD_ALLOWED_CHANNEL_IDS")
+    if not MONDAY_API_TOKEN:
+        missing.append("MONDAY_API_TOKEN")
+    if not MONDAY_BOARD_ID:
+        missing.append("MONDAY_BOARD_ID")
+    if not COL_REFERRAL_BONUS:
+        missing.append("COL_REFERRAL_BONUS")
     if missing:
         raise RuntimeError(f"Missing required env values: {', '.join(missing)}")
 
@@ -81,6 +93,63 @@ def save_state(state: dict[str, Any]) -> None:
 def hash_url(url: str) -> str:
     normalized = normalize_url(url)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def extract_referral_fee(content: str) -> str:
+    patterns = [
+        r"(?:referral\s*(?:bonus|fee)|bonus|reward|bounty)\s*[:\-]?\s*(\$?\s*[\d,]+(?:\.\d{1,2})?\s*(?:usd|cad)?)",
+        r"(\$?\s*[\d,]+(?:\.\d{1,2})?\s*(?:usd|cad)?)\s*(?:referral\s*(?:bonus|fee)|bonus|reward|bounty)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content or "", re.IGNORECASE)
+        if not match:
+            continue
+        value = re.sub(r"\s+", " ", match.group(1)).strip().replace("$ ", "$")
+        return value if value.startswith("$") else f"${value}"
+    return ""
+
+
+def monday_referral_value(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if COL_REFERRAL_BONUS.startswith(("numeric", "numbers")):
+        return re.sub(r"[^0-9.]", "", value)
+    return value
+
+
+def extract_monday_item_id(result_message: str) -> str:
+    match = re.search(r"Item ID:\s*(\d+)", result_message or "", re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+async def update_monday_referral_fee(item_id: str, referral_fee: str) -> None:
+    value = monday_referral_value(referral_fee)
+    if not item_id or not value:
+        return
+
+    mutation = """
+    mutation SetReferralFee($board_id: ID!, $item_id: ID!, $column_id: String!, $value: String!) {
+        change_simple_column_value(board_id: $board_id, item_id: $item_id, column_id: $column_id, value: $value) {
+            id
+        }
+    }
+    """
+    payload = {
+        "query": mutation,
+        "variables": {
+            "board_id": MONDAY_BOARD_ID,
+            "item_id": item_id,
+            "column_id": COL_REFERRAL_BONUS,
+            "value": value,
+        },
+    }
+    headers = {"Authorization": MONDAY_API_TOKEN, "Content-Type": "application/json"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.post(MONDAY_API_URL, json=payload) as response:
+            data = await response.json(content_type=None)
+    if "errors" in data:
+        raise RuntimeError(f"Monday referral fee update failed: {json.dumps(data['errors'], indent=2)}")
 
 
 async def fetch_recent_messages(session: aiohttp.ClientSession, channel_id: str) -> list[dict[str, Any]]:
@@ -138,6 +207,8 @@ async def main() -> None:
                     skipped_count += len(urls)
                     continue
 
+                referral_fee = extract_referral_fee(content)
+
                 for url in urls:
                     url_digest = hash_url(url)
                     if url_digest in seen_url_hashes:
@@ -149,8 +220,11 @@ async def main() -> None:
                             url=url,
                             channel_id=int(channel_id),
                             source_channel=f"Discord channel {channel_id} message {message_id}",
-                            source_text=content,
                         )
+                        if created and referral_fee:
+                            item_id = extract_monday_item_id(result)
+                            await update_monday_referral_fee(item_id, referral_fee)
+                            result = f"{result} | Referral Fee added: {referral_fee}"
                         print(result)
                         if created:
                             created_count += 1
